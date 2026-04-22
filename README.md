@@ -1,140 +1,174 @@
-# Test_Codes
-Testing done by Ishan for sensors for Hydroponics 
-Organisation: Cosy Farms
+# ESP32-S3 Hydroponics Controller
 
-# ESP32-S3 Hydroponics Controller v2
-
-A full-featured hydroponics monitoring and dosing controller built on the ESP32-S3 (N16R8), developed with PlatformIO/Arduino framework.
-
-## Features
-
-- 4x Relay outputs for lighting, pumps, or valves
-- 4x KFS-HE1S10P peristaltic pumps with LEDC PWM speed control and direction control
-- Atlas EZO-pH & EZO-EC sensors with temperature compensation and 5-point rolling average
-- DS18B20 solution temperature sensor (OneWire)
-- 2x DHT22 air temperature & humidity sensors
-- MH-Z19E CO2 sensor (PWM mode)
-- XKC-Y26 non-contact water level sensor
-- Onboard RGB NeoPixel (continuous hue cycle on Core 0)
-- FreeRTOS dual-core: RGB task pinned to Core 0, sensor/control loop on Core 1
+A comprehensive hydroponics monitoring and control system built on the ESP32-S3-DevKitC-1-N8R2 board. Handles EC/pH sensing, air and solution temperature, humidity, water level detection, peristaltic pump dosing, CO2 monitoring, and relay control for pumps and lighting.
 
 ## Hardware
+
+- **MCU**: ESP32-S3-DevKitC-1-N8R2 (8MB Flash, 2MB PSRAM QSPI)
+- **Framework**: Arduino via PlatformIO
+- **Upload / Monitor**: UART port (COM13) at 115200 baud
+
+## Pin Assignments
 
 | Component | GPIO(s) | Notes |
 |---|---|---|
 | Relay 1A / 1B | 4, 5 | 5V coil, active HIGH |
 | Relay 2A / 2B | 6, 7 | 5V coil, active HIGH |
 | RGB NeoPixel | 48 | Onboard, NEO_GRB |
+| Push Button 1 | 1 | INPUT_PULLUP, active LOW |
+| Push Button 2 | 2 | INPUT_PULLUP, active LOW |
 | EZO-pH | RX=16, TX=17 | UART1, 9600 baud, 3.3V |
 | EZO-EC | RX=18, TX=8 | UART2, 9600 baud, 3.3V |
-| DS18B20 | 38 | 4.7kΩ pull-up to 3.3V |
-| DHT22 #1 | 10 | 4.7–10kΩ pull-up to 3.3V |
-| DHT22 #2 | 11 | 4.7–10kΩ pull-up to 3.3V |
+| DS18B20 (solution temp) | 38 | 4.7kΩ pull-up to 3.3V |
+| DHT22 #1 (air T/RH) | 10 | 4.7–10kΩ pull-up to 3.3V |
+| DHT22 #2 (air T/RH) | 11 | 4.7–10kΩ pull-up to 3.3V |
 | Pump 1 PWM / DIR | 12, 13 | LEDC ch0, 10kΩ pull-down on PWM |
 | Pump 2 PWM / DIR | 14, 15 | LEDC ch1, 10kΩ pull-down on PWM |
 | Pump 3 PWM / DIR | 21, 33 | LEDC ch2, 10kΩ pull-down on PWM |
 | Pump 4 PWM / DIR | 34, 35 | LEDC ch3, 10kΩ pull-down on PWM |
-| MH-Z19E CO2 | 36 | PWM mode, 3.3V direct |
-| XKC-Y26 water level | 37 | 10k/20kΩ divider (5V→3.3V) |
+| MH-Z19E CO2 | RX=36, TX=40 | SoftwareSerial, 9600 baud, UART mode |
+| XKC-Y26 water level #1 | 37 | 10k/20k divider (5V→3.3V) |
+| XKC-Y26 water level #2 | 39 | 10k/20k divider (5V→3.3V) |
 
-## Critical Hardware Notes
+**Total GPIOs in use**: 26
 
-- 10kΩ pull-down resistor on **each** pump PWM pin — prevents ghost-run on boot
-- 4.7kΩ pull-up on DS18B20 data line to 3.3V
-- 4.7–10kΩ pull-up on each DHT22 data line to 3.3V
-- 10kΩ / 20kΩ voltage divider on XKC-Y26 output (5V → 3.3V)
-- 100µF + 100nF decoupling caps near ESP32 5V input (pump switching noise)
-- Shared GND between 12V pump rail, 5V buck converter, and ESP32
+## Detailed Wiring Notes
 
-## Timing
+### Peristaltic Pumps (Kamoer KFS-HE1S10P)
 
-| Task | Interval |
-|---|---|
-| Sensor read (DS18B20, DHT×2, pH, EC) | 5 s |
-| CO2 read (blocks ~1–2 s) | 15 s |
-| Relay demo toggle | 15 s |
-| Water level check | Every loop iteration |
-| RGB hue cycle | 20 ms (Core 0) |
+12V DC brushless, 0.4A, one slowdown gear, silicone 3×5mm tubing. Each pump has 5 wires:
 
-## Pump API
-
-```cpp
-pumpStart(idx, speed);        // idx: 0–3, speed: 0–255
-pumpStop(idx);                // graceful stop (ramps down, detaches LEDC)
-pumpSetSpeed(idx, newSpeed);  // change speed while running
-pumpSetDirection(idx, true);  // true = CCW, false = CW — stop pump first!
-```
-
-Example — dose 5 ml on pump 2 for 3 seconds:
-```cpp
-pumpStart(1, 150);
-delay(3000);
-pumpStop(1);
-```
-
-Safety pattern — halt all pumps if reservoir is empty:
-```cpp
-if (!waterPresent) {
-    for (int i = 0; i < 4; i++)
-        if (pumps[i].running) pumpStop(i);
-}
-```
-
-## Configuration
-
-Edit the defines at the top of `src/main.cpp`:
-
-| Define | Default | Description |
+| Wire | Function | Connection |
 |---|---|---|
-| `XKC_HIGH_MEANS_WATER_PRESENT` | `1` | Set to `0` if sensor logic is inverted |
-| `AUTO_START_PUMP_1` | `1` | Auto-start pump 1 on boot for testing |
+| Red | Power + | +12V external supply |
+| Black | Power – | GND (common with ESP32) |
+| Blue | PWM speed (5–20kHz) | GPIO pin + **10kΩ pull-down to GND** |
+| Yellow | Direction (LOW=CW, HIGH=CCW) | GPIO pin |
+| Green | FG speed feedback (1 pulse/rev) | Leave floating unless RPM monitoring is needed |
 
-## Build & Flash (PlatformIO)
+The 10kΩ pull-down on the PWM line is essential — without it the pin floats during boot/reset and the pump can ghost-run. PWM runs at 10kHz with 8-bit resolution (0–255 duty).
+
+### Water Level Sensors (XKC-Y26-V)
+
+Capacitive non-contact sensor, 5–24V input. Output is **5V high/low** — an external 10k/20k divider is required to step down to 3.3V for ESP32 inputs:
+
+```
+Yellow wire ──┬── 10kΩ ──┬── ESP32 GPIO
+              │          │
+              │         20kΩ
+              │          │
+              └──────────┴── GND
+```
+
+5V × (20k / (10k + 20k)) = **3.33V** → safe for ESP32.
+
+Black wire left floating selects NO mode (HIGH output when liquid is detected, matching the `WET` reading in firmware). Connecting Black to Blue selects NC mode (inverted).
+
+### EZO pH/EC Sensors (Atlas Scientific)
+
+UART mode, 9600 baud, 3.3V or 5V supply. Each sensor uses a dedicated hardware UART on the ESP32-S3. Calibration (single-point 1413 μS/cm for EC K=1.0 probe, multi-point for pH) is stored in the board itself and persists across sketch changes and power cycles.
+
+EC output configured for EC-only (TDS, salinity, SG disabled) at firmware boot.
+
+### DHT22 (DFRobot DFR0067 / SEN0137)
+
+Single-wire digital sensor. Most DFRobot modules include an onboard pull-up; bare sensors need a 4.7–10kΩ pull-up from DATA to 3.3V. Minimum 2 seconds between reads — firmware reads every 5 seconds.
+
+### DS18B20 (solution temperature)
+
+Submersible probe, OneWire protocol. Single 4.7kΩ pull-up from DATA to 3.3V. Multiple probes can share the same bus but only index 0 is read.
+
+### MH-Z19E CO2 Sensor (UART mode)
+
+NDIR CO2 sensor, 0–5000 ppm range, ±50 ppm accuracy. Runs in UART mode (9600 baud) via SoftwareSerial since both hardware UARTs are occupied by the EZO boards.
+
+| MH-Z19E Pin | ESP32 | Notes |
+|---|---|---|
+| VIN | +5V | Sensor needs 4.5–5.5V |
+| GND | GND | Common ground |
+| TX | GPIO 36 (ESP32 RX) | Sensor TX is 3.3V TTL — direct connection OK |
+| RX | GPIO 40 (ESP32 TX) | ESP32 TX is 3.3V — compatible with sensor |
+| HD | Leave floating | Manual zero-point calibration trigger |
+| PWM | Leave floating | Unused in UART mode |
+
+**ABC (Auto Baseline Calibration) disabled in firmware** for indoor hydroponics use. ABC assumes the sensor sees fresh-air (~400 ppm) baseline every 24 hours; in sealed grow rooms where plants consume CO2, this assumption breaks and the sensor drifts. Manual calibration via the HD pin or the `0x87` UART command in fresh outdoor air every few months keeps readings accurate.
+
+First 3 minutes after power-on are warmup — firmware skips readings until the sensor reports ready.
+
+### Push Buttons
+
+Active LOW with internal pull-up — no external resistors needed. 50ms software debounce.
+
+## LEDC Channel Map
+
+| Channel | Pump | GPIO |
+|---|---|---|
+| 0 | Pump 1 | 12 |
+| 1 | Pump 2 | 14 |
+| 2 | Pump 3 | 21 |
+| 3 | Pump 4 | 34 |
+
+Channels 4–7 remain free for additional PWM loads.
+
+## Power Requirements
+
+- **ESP32-S3**: 3.3V (supplied via USB or regulator)
+- **Pumps**: 12V DC, ~0.4A each (up to 1.6A for four pumps)
+- **Water level sensors**: 5V, ~5mA each
+- **DHT22 / DS18B20**: 3.3V
+- **EZO boards**: 3.3V or 5V (check your specific model)
+- **Relays**: 5V coil
+
+Keep 12V (pump) and 3.3V/5V (logic) supplies with a common ground.
+
+## Firmware Behavior
+
+- **Relays**: Toggle HIGH/LOW every 30 seconds (test mode — replace with real logic for production)
+- **Pump 1**: Starts immediately on boot (direct ON at ~78% speed)
+- **Sensors**: Read every 5 seconds
+- **RGB LED**: Continuous hue cycle on Core 0 (isolated from sensor UART on Core 1)
+- **Boot delay**: 10 seconds to allow sensor power stabilization
+
+## Serial Output Format
+
+```
+SolT: 24.50C  AirT: 26.3C RH: 65.2%  CO2: 612ppm  TankHi:DRY TankLo:WET  pH: 6.85 (avg/6.83 n3) '6.85'  EC: 1.415 (avg/1.410 n3) '1415'
+```
+
+Fields:
+- `SolT` — solution temperature (DS18B20)
+- `AirT`, `RH` — air temperature and humidity (DHT22)
+- `CO2` — ambient CO2 in ppm (MH-Z19E)
+- `TankHi`, `TankLo` — water level states (WET/DRY)
+- `pH` / `EC` — smoothed (5-point moving average) + instantaneous value + sample count + raw response
+
+## Build & Upload
 
 ```bash
-pio run --target upload
-pio device monitor --baud 115200
+pio run -t clean
+pio run -t upload
+pio device monitor
 ```
 
-## Serial Output Example
+COM port is pinned to COM13 in `platformio.ini`. Update `upload_port` and `monitor_port` if the enumeration changes.
 
-```
-========================================
-  ESP32-S3 Hydroponics Controller v2
-  4 Pumps | 4 Relays | 8 Sensors
-========================================
+## Available GPIOs (Free)
 
-[INIT] Relays: R1:GPIO4 OFF ...
-[INIT] Pumps:  P1: PWM=GPIO12 (ch0)  DIR=GPIO13
-[P1] START speed=200 (78%)
-[WATER] Initial: PRESENT
-SolT:23.45C  A1:24.1C/62%  A2:24.3C/61%  pH:6.82(avg)  EC:1.450(avg)  H2O:OK  CO2:824ppm
-```
+On the N8R2 variant, these safe pins remain free for future additions:
 
-## Sensor Warm-up
+**Clean (preferred first)**: 3, 9, 41, 42, 47
 
-- **MH-Z19E CO2**: requires ~3 minutes after power-on for accurate readings
-- **EZO-pH / EZO-EC**: allow ~2 minutes for circuit stabilization; calibrate before use
+**Use with caution**:
+- GPIO 0 — BOOT button (has pull-up)
+- GPIO 45, 46 — strapping pins (require specific boot state)
+- GPIO 19, 20 — USB D-/D+ (avoid if using native USB port)
+- GPIO 43, 44 — UART0 (reserved for upload/monitor)
 
-## Calibration
+**Reserved (do not use)**:
+- GPIO 26–32 — Flash SPI
 
-Send calibration commands via serial (115200 baud) or over UART directly to the EZO circuits:
+## Notes
 
-```
-# pH — 3-point calibration
-cal,mid,7.00
-cal,low,4.00
-cal,high,10.00
-
-# EC — dry + single-point
-cal,dry
-cal,one,1413
-```
-
-## Dependencies
-
-Managed by PlatformIO (`platformio.ini`):
-
-- `Adafruit NeoPixel`
-- `DallasTemperature` + `OneWire`
-- `DHT sensor library` (Adafruit)
+- The N8R2 variant uses **QSPI PSRAM**, which leaves GPIOs 33–37 free. This configuration will NOT work on the N16R8 variant (OPI PSRAM) without reassigning those pins.
+- EZO sensor calibration is device-side, not code-side — reflashing does not affect calibration.
+- Moving-average smoothing (n=5) hides short transients. Raw values are also logged for debugging.
